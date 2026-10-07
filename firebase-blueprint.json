@@ -1,0 +1,111 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "Oficial o agente activo del Buró Cibernético de Investigación",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string", "pattern": "^[a-zA-Z0-9._%+-]+@cib\\.gob\\.pa$" },
+        "displayName": { "type": "string", "maxLength": 100 },
+        "badgeNumber": { "type": "string", "maxLength": 20 },
+        "role": { "type": "string", "enum": ["COMISIONADO_DIRECTOR", "AGENTE_FORENSE_TECNICO", "AUDITOR_LEGAL_NORMATIVO", "ANALISTA_DE_RIESGO", "OBSERVADOR_CADETE"] },
+        "rank": { "type": "string", "maxLength": 60 },
+        "department": { "type": "string", "maxLength": 80 },
+        "active": { "type": "boolean" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["uid", "email", "displayName", "role"]
+    },
+    "Case": {
+      "title": "Case",
+      "description": "Expediente de investigación y respuesta a incidentes forenses del CIB",
+      "type": "object",
+      "properties": {
+        "codigo": { "type": "string", "maxLength": 40 },
+        "title": { "type": "string", "maxLength": 200 },
+        "operationCodename": { "type": "string", "maxLength": 100 },
+        "summary": { "type": "string", "maxLength": 2000 },
+        "classification": { "type": "string", "enum": ["RESERVADO", "CONFIDENCIAL", "SECRETO DE ESTADO"] },
+        "status": { "type": "string", "enum": ["ABIERTO", "EN_AUDITORIA", "CERRADO"] },
+        "vector": { "type": "string" },
+        "probability": { "type": "number" },
+        "impact": { "type": "number" },
+        "riskScore": { "type": "number" },
+        "leadInvestigatorBadge": { "type": "string" },
+        "leadInvestigatorEmail": { "type": "string" },
+        "targetEntity": { "type": "string" },
+        "detectedAt": { "type": "string" },
+        "sealedAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["codigo", "title", "classification", "status", "probability", "impact", "riskScore"]
+    },
+    "EvidenceArtifact": {
+      "title": "EvidenceArtifact",
+      "description": "Artefacto forense digital con hash SHA-256 inmutable de cadena de custodia",
+      "type": "object",
+      "properties": {
+        "evidenceCode": { "type": "string" },
+        "name": { "type": "string" },
+        "fileType": { "type": "string" },
+        "fileSize": { "type": "string" },
+        "hashSha256": { "type": "string", "maxLength": 64, "minLength": 64 },
+        "chainOfCustodyCustodian": { "type": "string" },
+        "collectionTimestamp": { "type": "string" },
+        "extractionLocation": { "type": "string" },
+        "isCompromised": { "type": "boolean" }
+      },
+      "required": ["evidenceCode", "name", "hashSha256", "chainOfCustodyCustodian"]
+    },
+    "TimelineDay": {
+      "title": "TimelineDay",
+      "description": "Registro cronológico estricto de eventos forenses (Días 1 al 5)",
+      "type": "object",
+      "properties": {
+        "dayNumber": { "type": "number" },
+        "title": { "type": "string" },
+        "timestamp": { "type": "string" },
+        "leadInvestigator": { "type": "string" },
+        "findings": { "type": "string" },
+        "chainOfCustodyVerified": { "type": "boolean" }
+      },
+      "required": ["dayNumber", "title", "timestamp", "findings"]
+    },
+    "Regulation": {
+      "title": "Regulation",
+      "description": "Marco legal panameño e internacional de ciberseguridad y prueba digital",
+      "type": "object",
+      "properties": {
+        "code": { "type": "string" },
+        "name": { "type": "string" },
+        "jurisdiction": { "type": "string", "enum": ["PANAMA", "INTERNACIONAL"] },
+        "promulgationDate": { "type": "string" },
+        "summary": { "type": "string" }
+      },
+      "required": ["code", "name", "jurisdiction", "summary"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "Directorio de agentes y credenciales autorizadas del CIB"
+    },
+    "/cases/{caseCode}": {
+      "schema": "Case",
+      "description": "Expedientes de investigación forense"
+    },
+    "/cases/{caseCode}/evidence/{evidenceId}": {
+      "schema": "EvidenceArtifact",
+      "description": "Artefactos digitales sujetos a cadena de custodia forense inmutable"
+    },
+    "/cases/{caseCode}/timeline/{dayNumber}": {
+      "schema": "TimelineDay",
+      "description": "Cronología operativa forense de 5 días de la investigación"
+    },
+    "/regulations/{regId}": {
+      "schema": "Regulation",
+      "description": "Repositorio normativo digital y jurisprudencia"
+    }
+  }
+}

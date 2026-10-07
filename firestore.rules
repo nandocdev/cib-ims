@@ -1,0 +1,84 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Default deny all access unless explicitly granted
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions for security and forensic compliance
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // Verification of authorized institutional domain: @cib.gob.pa or session officer
+    function isCibOfficer() {
+      return isSignedIn() && (
+        (request.auth.token.email != null && request.auth.token.email.matches('.*@cib[.]gob[.]pa$')) ||
+        request.auth.token.firebase.sign_in_provider == 'anonymous'
+      );
+    }
+
+    // Check if the case is currently in open status for modifications
+    function isCaseOpen(caseCode) {
+      return get(/databases/$(database)/documents/cases/$(caseCode)).data.status == 'ABIERTO';
+    }
+
+    // Colección: Usuarios del Buró Cibernético (/users/{userId})
+    match /users/{userId} {
+      allow read: if isCibOfficer();
+      // Only the user themselves or director can modify profile metadata
+      allow write: if isCibOfficer() && (
+        request.auth.uid == userId ||
+        request.auth.token.email == 'usuario1@cib.gob.pa'
+      );
+    }
+
+    // Colección: Casos y Expedientes Forenses (/cases/{caseCode})
+    match /cases/{caseCode} {
+      // Lectura permitida a todo el personal institucional del CIB
+      allow read: if isCibOfficer();
+
+      // Creación de nuevos casos: Solo agentes institucionales autorizados
+      allow create: if isCibOfficer() &&
+        request.resource.data.codigo == caseCode &&
+        request.resource.data.status == 'ABIERTO';
+
+      // Modificación e inmutabilidad:
+      // Si el caso está en 'EN_AUDITORIA' o 'CERRADO', cualquier escritura es bloqueada
+      // para preservar la cadena de custodia y la validez procesal.
+      allow update: if isCibOfficer() &&
+        resource.data.status == 'ABIERTO';
+
+      // Eliminación: Estrictamente restringida; solo casos abiertos
+      allow delete: if isCibOfficer() &&
+        resource.data.status == 'ABIERTO' &&
+        request.auth.token.email == 'usuario1@cib.gob.pa';
+
+      // Subcolección: Artefactos de Evidencia (/cases/{caseCode}/evidence/{evidenceId})
+      match /evidence/{evidenceId} {
+        allow read: if isCibOfficer();
+        allow create, update, delete: if isCibOfficer() && isCaseOpen(caseCode);
+      }
+
+      // Subcolección: Bitácora de 5 Días (/cases/{caseCode}/timeline/{dayNumber})
+      match /timeline/{dayNumber} {
+        allow read: if isCibOfficer();
+        allow create, update, delete: if isCibOfficer() && isCaseOpen(caseCode);
+      }
+
+      // Subcolección: Interrogatorios y Preguntas Capciosas (/cases/{caseCode}/interrogations/{questionId})
+      match /interrogations/{questionId} {
+        allow read: if isCibOfficer();
+        allow create, update, delete: if isCibOfficer() && isCaseOpen(caseCode);
+      }
+    }
+
+    // Colección: Normativas y Jurisprudencia (/regulations/{regId})
+    match /regulations/{regId} {
+      allow read: if true; // Leyes y gacetas oficiales de la República de Panamá son de acceso público
+      allow write: if isCibOfficer();
+    }
+  }
+}

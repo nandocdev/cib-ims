@@ -1,0 +1,8 @@
+{
+  "name": "CIB-IMS | Buró Cibernético de Investigación - República de Panamá",
+  "description": "Sistema de Gestión de Incidentes Forenses y Repositorio Táctico de Ciberinvestigación (CIB-IMS) de la República de Panamá.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
