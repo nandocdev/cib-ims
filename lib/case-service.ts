@@ -1,299 +1,188 @@
 // lib/case-service.ts
 // Buró Cibernético de Investigación (CIB) - República de Panamá
-// Capa de Servicios Forenses y Gestión de Expedientes con Respaldo Reactivo
+// Capa de Fachada de Aplicación (Application Façade) orientada a la arquitectura modular de dominios
 
-import { Case, EvidenceArtifact, TimelineDay, InterrogationQuestion, Regulation } from '@/types/cib';
-import { INITIAL_CASES, INITIAL_REGULATIONS } from './data/initial-data';
-import { db, handleFirestoreError, OperationType } from './firebase/client';
-import {
-  collection,
-  doc,
-  getDoc,
-  getDocs,
-  setDoc,
-  updateDoc,
-} from 'firebase/firestore';
+import { Case, CreateCaseInput, UpdateCaseInput } from '@/lib/domain/cases/case';
+import { Regulation } from '@/types/cib';
+import { caseRepository } from '@/lib/infrastructure/repositories/firestore-case-repository';
+import { auditRepository } from '@/lib/infrastructure/repositories/firestore-audit-repository';
+import { regulationRepository } from '@/lib/infrastructure/repositories/firestore-regulation-repository';
+import { CreateCaseUseCase } from '@/lib/application/cases/create-case-use-case';
+import { UpdateCaseUseCase } from '@/lib/application/cases/update-case-use-case';
+import { TransitionCaseStatusUseCase } from '@/lib/application/cases/transition-case-status-use-case';
+import { INITIAL_CASES } from '@/lib/data/initial-cases';
+import { INITIAL_REGULATIONS } from '@/lib/data/initial-data';
+import { logger } from '@/lib/observability/logger';
 
-const STORAGE_CASES_KEY = 'cib_ims_cases_cache_v3';
-const STORAGE_REGS_KEY = 'cib_ims_regs_cache_v3';
-
-// Función para obtener casos locales iniciales o almacenados en cache de sesión
-export function getStoredCases(): Case[] {
-  if (typeof window === 'undefined') {
-    return INITIAL_CASES;
-  }
-  try {
-    const raw = localStorage.getItem(STORAGE_CASES_KEY);
-    if (!raw) {
-      localStorage.setItem(STORAGE_CASES_KEY, JSON.stringify(INITIAL_CASES));
-      return INITIAL_CASES;
-    }
-    const parsed: Case[] = JSON.parse(raw);
-    // Si la cache tiene menos casos que el catálogo oficial (14 casos), sincronizar al catálogo completo
-    if (!Array.isArray(parsed) || parsed.length < INITIAL_CASES.length) {
-      localStorage.setItem(STORAGE_CASES_KEY, JSON.stringify(INITIAL_CASES));
-      return INITIAL_CASES;
-    }
-    return parsed;
-  } catch {
-    return INITIAL_CASES;
-  }
-}
-
-export function saveStoredCases(cases: Case[]) {
-  if (typeof window !== 'undefined') {
-    try {
-      localStorage.setItem(STORAGE_CASES_KEY, JSON.stringify(cases));
-    } catch (e) {
-      console.warn('Error saving cases locally:', e);
-    }
-  }
-}
+// Instancias de Casos de Uso
+const createCaseUseCase = new CreateCaseUseCase(caseRepository, auditRepository);
+const updateCaseUseCase = new UpdateCaseUseCase(caseRepository, auditRepository);
+const transitionCaseStatusUseCase = new TransitionCaseStatusUseCase(caseRepository, auditRepository);
 
 /**
- * Obtener todos los casos del repositorio con métricas calculadas
+ * Consulta de todos los casos desde el repositorio oficial
  */
 export async function getAllCases(): Promise<Case[]> {
   try {
-    // Si Firestore está disponible en el cliente, intentar lectura
-    if (db && typeof db.app !== 'undefined') {
-      try {
-        const querySnapshot = await getDocs(collection(db, 'cases'));
-        if (!querySnapshot.empty) {
-          const list: Case[] = [];
-          querySnapshot.forEach((d) => {
-            list.push(d.data() as Case);
-          });
-          saveStoredCases(list);
-          return list;
-        }
-      } catch (firestoreError) {
-        // En caso de modo offline o sin credenciales, advertencia controlada y fallback
-        console.info('[CIB-IMS] Firestore remoto offline/fallback local:', firestoreError);
-      }
-    }
+    return await caseRepository.findAll();
   } catch (err) {
-    console.warn('[CIB-IMS] Error al leer Firestore, utilizando repositorio local:', err);
+    logger.error('Error en getAllCases', undefined, err);
+    return INITIAL_CASES;
   }
-  return getStoredCases();
 }
 
 /**
- * Obtener expediente completo con artefactos de evidencia, bitácora y preguntas
+ * Consulta de un caso específico por su código institucional
  */
 export async function getCaseByCode(codigo: string): Promise<Case | null> {
-  const cases = getStoredCases();
-  const found = cases.find((c) => c.codigo.toUpperCase() === codigo.toUpperCase());
-
-  if (!found) return null;
-
   try {
-    if (db && typeof db.app !== 'undefined') {
-      const caseDocRef = doc(db, 'cases', codigo);
-      const caseSnap = await getDoc(caseDocRef);
-      if (caseSnap.exists()) {
-        const data = caseSnap.data() as Case;
-        return {
-          ...found,
-          ...data,
-          evidence: found.evidence,
-          timeline: found.timeline,
-          interrogations: found.interrogations,
-        };
-      }
-    }
-  } catch {
-    // Retornar la copia local completa
+    return await caseRepository.findByCode(codigo);
+  } catch (err) {
+    logger.error(`Error en getCaseByCode [${codigo}]`, { codigo }, err);
+    return null;
   }
-
-  return found;
 }
 
 /**
- * Actualizar expediente técnico.
- * REGLA FORENSE INMUTABLE:
- * SOLO SE PERMITE MODIFICAR SI EL CASO ESTÁ EN ESTADO 'ABIERTO'.
- * Si el caso está en 'EN_AUDITORIA' o 'CERRADO', se lanza un error de violación de protocolo.
+ * Actualización técnica de expediente delegada a casos de uso de dominio
  */
 export async function updateCaseByCode(
   codigo: string,
   updatedFields: Partial<Case>,
   userRole?: string
 ): Promise<{ success: boolean; case: Case; message?: string }> {
-  const cases = getStoredCases();
-  const index = cases.findIndex((c) => c.codigo.toUpperCase() === codigo.toUpperCase());
-
-  if (index === -1) {
-    throw new Error(`Expediente ${codigo} no fue encontrado en los registros del CIB.`);
+  const current = await caseRepository.findByCode(codigo);
+  if (!current) {
+    throw new Error(`Expediente [${codigo}] no fue localizado en los registros del CIB.`);
   }
 
-  const currentCase = cases[index];
-
-  // REGLA FUNDAMENTAL DE INMUTABILIDAD FORENSE:
-  if (currentCase.status !== 'ABIERTO') {
-    const errorMsg = `VIOLACIÓN DE CADENA DE CUSTODIA FORENSE: El expediente [${currentCase.codigo}] se encuentra en estado '${currentCase.status}'. Conforme a la Ley 51 de 2008 y Resolución AIG 18-2026, los expedientes en auditoría o cerrados poseen sello criptográfico inmutable y no admiten modificaciones.`;
-    console.error(errorMsg);
-    throw new Error(errorMsg);
-  }
-
-  // Recalcular P x I si se actualizaron probabilidad o impacto
-  const probability = updatedFields.probability ?? currentCase.probability;
-  const impact = updatedFields.impact ?? currentCase.impact;
-  const riskScore = probability * impact;
-
-  const modifiedCase: Case = {
-    ...currentCase,
-    ...updatedFields,
-    probability,
-    impact,
-    riskScore,
-    updatedAt: new Date().toISOString(),
+  const actorRole = userRole || 'INVESTIGATOR';
+  const actor = {
+    id: current.leadInvestigatorBadge,
+    name: current.leadInvestigatorName,
+    role: actorRole,
+    badgeNumber: current.leadInvestigatorBadge,
+    email: current.leadInvestigatorEmail,
   };
 
-  // Si se transiciona el estado a CERRADO, asentar fecha de sellado
-  if (updatedFields.status === 'CERRADO' && !modifiedCase.sealedAt) {
-    modifiedCase.sealedAt = new Date().toISOString();
+  // Si se solicita una transición de estado (ej: CERRADO o EN_AUDITORIA), utilizar la máquina de estados
+  if (updatedFields.status && updatedFields.status !== current.status) {
+    const updated = await transitionCaseStatusUseCase.execute({
+      codigo,
+      targetStatus: updatedFields.status,
+      reason: updatedFields.resolutionVerdict || 'Transición de estado formal aprobada',
+      resolutionVerdict: updatedFields.resolutionVerdict,
+      residualProbability: updatedFields.residualProbability,
+      residualImpact: updatedFields.residualImpact,
+      actor,
+    });
+
+    return {
+      success: true,
+      case: updated,
+      message: `Expediente ${codigo} transicionado exitosamente a estado [${updated.status}].`,
+    };
   }
 
-  cases[index] = modifiedCase;
-  saveStoredCases(cases);
-
-  // Sincronizar con Firestore si está conectado
-  try {
-    if (db && typeof db.app !== 'undefined') {
-      const caseDocRef = doc(db, 'cases', codigo);
-      await updateDoc(caseDocRef, {
-        ...updatedFields,
-        riskScore,
-        updatedAt: modifiedCase.updatedAt,
-        ...(modifiedCase.sealedAt ? { sealedAt: modifiedCase.sealedAt } : {}),
-        ...(modifiedCase.resolutionVerdict ? { resolutionVerdict: modifiedCase.resolutionVerdict } : {}),
-        ...(modifiedCase.residualRiskScore !== undefined ? { residualRiskScore: modifiedCase.residualRiskScore } : {}),
-        ...(modifiedCase.resolvedByName ? { resolvedByName: modifiedCase.resolvedByName } : {}),
-        ...(modifiedCase.resolvedByBadge ? { resolvedByBadge: modifiedCase.resolvedByBadge } : {}),
-        ...(modifiedCase.resolutionHash ? { resolutionHash: modifiedCase.resolutionHash } : {}),
-      });
-    }
-  } catch (err) {
-    console.warn('[CIB-IMS] Firestore sync fallback local:', err);
-  }
+  // Actualización regular de campos
+  const { id, codigo: _c, ...cleanUpdates } = updatedFields as any;
+  const updated = await updateCaseUseCase.execute({
+    codigo,
+    updates: cleanUpdates,
+    reason: 'Actualización técnica de parámetros de caso',
+    actor,
+  });
 
   return {
     success: true,
-    case: modifiedCase,
-    message: `Expediente ${codigo} actualizado satisfactoriamente con nueva evaluación de riesgo PxI = ${riskScore}.`,
+    case: updated,
+    message: `Expediente ${codigo} actualizado satisfactoriamente con nueva evaluación de riesgo PxI = ${updated.riskScore}.`,
   };
 }
 
 /**
- * Reabrir expediente técnico para nuevos talleres de estudiantes
- */
-export async function reopenCaseByCode(codigo: string): Promise<Case> {
-  const cases = getStoredCases();
-  const index = cases.findIndex((c) => c.codigo.toUpperCase() === codigo.toUpperCase());
-  if (index === -1) {
-    throw new Error(`Expediente ${codigo} no fue encontrado.`);
-  }
-
-  const reopened: Case = {
-    ...cases[index],
-    status: 'ABIERTO',
-    sealedAt: undefined,
-    resolutionVerdict: undefined,
-    residualProbability: undefined,
-    residualImpact: undefined,
-    residualRiskScore: undefined,
-    resolutionHash: undefined,
-    updatedAt: new Date().toISOString(),
-  };
-
-  cases[index] = reopened;
-  saveStoredCases(cases);
-
-  try {
-    if (db && typeof db.app !== 'undefined') {
-      const caseDocRef = doc(db, 'cases', codigo);
-      await updateDoc(caseDocRef, {
-        status: 'ABIERTO',
-        sealedAt: null,
-        resolutionVerdict: null,
-        residualRiskScore: null,
-        resolutionHash: null,
-        updatedAt: reopened.updatedAt,
-      });
-    }
-  } catch (e) {
-    console.warn('[CIB-IMS] Error al sincronizar reapertura en Firestore:', e);
-  }
-
-  return reopened;
-}
-
-/**
- * Alta y registro de un nuevo incidente forense (siempre inicia en 'ABIERTO')
+ * Alta y registro formal de un nuevo incidente forense
  */
 export async function createNewCase(
   newCaseData: Omit<Case, 'id' | 'riskScore' | 'updatedAt' | 'detectedAt'>
 ): Promise<Case> {
-  const cases = getStoredCases();
-
-  // Validar código único
-  if (cases.some((c) => c.codigo.toUpperCase() === newCaseData.codigo.toUpperCase())) {
-    throw new Error(`El código institucional [${newCaseData.codigo}] ya está asignado a otro expediente.`);
-  }
-
-  const riskScore = newCaseData.probability * newCaseData.impact;
-  const now = new Date().toISOString();
-
-  const completeCase: Case = {
-    ...newCaseData,
-    id: `case-${Date.now()}`,
-    status: 'ABIERTO', // Todo nuevo caso inicia abierto
-    riskScore,
-    detectedAt: now,
-    updatedAt: now,
-    evidenceCount: newCaseData.evidence?.length || 0,
-    daysLoggedCount: newCaseData.timeline?.length || 0,
-    evidence: newCaseData.evidence || [],
-    timeline: newCaseData.timeline || [],
-    interrogations: newCaseData.interrogations || [],
+  const actor = {
+    id: newCaseData.leadInvestigatorBadge,
+    name: newCaseData.leadInvestigatorName,
+    role: 'INVESTIGATOR',
+    badgeNumber: newCaseData.leadInvestigatorBadge,
+    email: newCaseData.leadInvestigatorEmail,
   };
 
-  cases.unshift(completeCase);
-  saveStoredCases(cases);
-
-  try {
-    if (db && typeof db.app !== 'undefined') {
-      const caseDocRef = doc(db, 'cases', completeCase.codigo);
-      await setDoc(caseDocRef, completeCase);
-    }
-  } catch (err) {
-    console.warn('[CIB-IMS] Fallback de guardado local para nuevo caso:', err);
-  }
-
-  return completeCase;
+  return createCaseUseCase.execute({
+    input: newCaseData as CreateCaseInput,
+    actor,
+  });
 }
 
 /**
- * Obtener jurisprudencia y marco regulatorio digital
+ * Reapertura formal de expediente forense autorizada por Supervisor
+ */
+export async function reopenCaseByCode(codigo: string, supervisorRole = 'SUPERVISOR'): Promise<Case> {
+  const current = await caseRepository.findByCode(codigo);
+  if (!current) {
+    throw new Error(`Expediente [${codigo}] no localizado.`);
+  }
+
+  const actor = {
+    id: 'CIB-001-DIR',
+    name: 'Comisionado Director',
+    role: supervisorRole,
+    badgeNumber: 'CIB-001-DIR',
+  };
+
+  return transitionCaseStatusUseCase.execute({
+    codigo,
+    targetStatus: 'ABIERTO',
+    reason: 'Reapertura formal autorizada por Supervisor para nuevo taller pericial',
+    actor,
+  });
+}
+
+/**
+ * Consulta de jurisprudencia y marco regulatorio digital
  */
 export async function getAllRegulations(): Promise<Regulation[]> {
-  if (typeof window !== 'undefined') {
-    try {
-      const stored = localStorage.getItem(STORAGE_REGS_KEY);
-      if (stored) return JSON.parse(stored);
-      localStorage.setItem(STORAGE_REGS_KEY, JSON.stringify(INITIAL_REGULATIONS));
-    } catch {}
+  try {
+    const list = await regulationRepository.findAll();
+    return list.map((r) => ({
+      id: r.regulationId,
+      code: r.code,
+      name: r.name,
+      jurisdiction: r.jurisdiction,
+      promulgationDate: r.promulgationDate,
+      summary: r.summary,
+      keyArticles: r.keyArticles,
+      officialLink: r.officialLink || undefined,
+    }));
+  } catch {
+    return INITIAL_REGULATIONS;
   }
-  return INITIAL_REGULATIONS;
 }
 
 /**
- * Restablecer datos iniciales oficiales (función de laboratorio para pruebas forenses)
+ * Función de laboratorio para restablecer datos de fixtures en ambiente de desarrollo
  */
 export function resetInstitutionalData(): void {
   if (typeof window !== 'undefined') {
-    localStorage.setItem(STORAGE_CASES_KEY, JSON.stringify(INITIAL_CASES));
-    localStorage.setItem(STORAGE_REGS_KEY, JSON.stringify(INITIAL_REGULATIONS));
+    localStorage.removeItem('cib_ims_cases_store_v4');
+    localStorage.removeItem('cib_ims_audit_trail_v4');
+    localStorage.removeItem('cib_ims_regulations_store_v4');
   }
+}
+
+/**
+ * Funciones de soporte heredadas
+ */
+export function getStoredCases(): Case[] {
+  return INITIAL_CASES;
+}
+
+export function saveStoredCases(cases: Case[]): void {
+  // Manejado internamente por el repositorio
 }

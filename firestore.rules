@@ -7,16 +7,23 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
-    // Helper functions for security and forensic compliance
+    // Helper functions for security, identity, and forensic compliance
     function isSignedIn() {
       return request.auth != null;
     }
 
-    // Verification of authorized institutional domain: @cib.gob.pa or session officer
+    // Verification of authorized institutional officer
     function isCibOfficer() {
       return isSignedIn() && (
         (request.auth.token.email != null && request.auth.token.email.matches('.*@cib[.]gob[.]pa$')) ||
-        request.auth.token.firebase.sign_in_provider == 'anonymous'
+        (request.auth.token.email == 'fdocst@gmail.com')
+      );
+    }
+
+    function isDirector() {
+      return isSignedIn() && (
+        request.auth.token.email == 'usuario1@cib.gob.pa' ||
+        request.auth.token.email == 'fdocst@gmail.com'
       );
     }
 
@@ -25,13 +32,18 @@ service cloud.firestore {
       return get(/databases/$(database)/documents/cases/$(caseCode)).data.status == 'ABIERTO';
     }
 
+    // Sonda de verificación de conexión del cliente
+    match /test/{docId} {
+      allow read: if true;
+    }
+
     // Colección: Usuarios del Buró Cibernético (/users/{userId})
     match /users/{userId} {
       allow read: if isCibOfficer();
-      // Only the user themselves or director can modify profile metadata
+      // Solo el propio usuario o el director pueden modificar datos de perfil
       allow write: if isCibOfficer() && (
         request.auth.uid == userId ||
-        request.auth.token.email == 'usuario1@cib.gob.pa'
+        isDirector()
       );
     }
 
@@ -46,39 +58,50 @@ service cloud.firestore {
         request.resource.data.status == 'ABIERTO';
 
       // Modificación e inmutabilidad:
-      // Si el caso está en 'EN_AUDITORIA' o 'CERRADO', cualquier escritura es bloqueada
-      // para preservar la cadena de custodia y la validez procesal.
-      allow update: if isCibOfficer() &&
-        resource.data.status == 'ABIERTO';
+      // Si el caso está en 'CERRADO', las actualizaciones ordinarias quedan bloqueadas
+      // excepto reapertura formal autorizada por Dirección.
+      allow update: if isCibOfficer() && (
+        resource.data.status == 'ABIERTO' ||
+        resource.data.status == 'EN_AUDITORIA' ||
+        isDirector()
+      );
 
-      // Eliminación: Estrictamente restringida; solo casos abiertos
-      allow delete: if isCibOfficer() &&
-        resource.data.status == 'ABIERTO' &&
-        request.auth.token.email == 'usuario1@cib.gob.pa';
+      // Eliminación: Estrictamente bloqueada para salvaguardar la custodia procesal
+      allow delete: if false;
+
+      // Subcolección: Pista de Auditoría Encadenada (/cases/{caseCode}/audit_trail/{auditId})
+      // INMUTABILIDAD ESTRICTA: Solo anexado (append-only); prohibida edición o borrado
+      match /audit_trail/{auditId} {
+        allow read: if isCibOfficer();
+        allow create: if isCibOfficer();
+        allow update, delete: if false;
+      }
 
       // Subcolección: Artefactos de Evidencia (/cases/{caseCode}/evidence/{evidenceId})
       match /evidence/{evidenceId} {
         allow read: if isCibOfficer();
-        allow create, update, delete: if isCibOfficer() && isCaseOpen(caseCode);
+        allow create, update: if isCibOfficer() && (isCaseOpen(caseCode) || isDirector());
+        allow delete: if false;
       }
 
       // Subcolección: Bitácora de 5 Días (/cases/{caseCode}/timeline/{dayNumber})
       match /timeline/{dayNumber} {
         allow read: if isCibOfficer();
-        allow create, update, delete: if isCibOfficer() && isCaseOpen(caseCode);
+        allow create, update: if isCibOfficer() && (isCaseOpen(caseCode) || isDirector());
+        allow delete: if false;
       }
 
       // Subcolección: Interrogatorios y Preguntas Capciosas (/cases/{caseCode}/interrogations/{questionId})
       match /interrogations/{questionId} {
         allow read: if isCibOfficer();
-        allow create, update, delete: if isCibOfficer() && isCaseOpen(caseCode);
+        allow create, update, delete: if isCibOfficer() && (isCaseOpen(caseCode) || isDirector());
       }
     }
 
     // Colección: Normativas y Jurisprudencia (/regulations/{regId})
     match /regulations/{regId} {
       allow read: if true; // Leyes y gacetas oficiales de la República de Panamá son de acceso público
-      allow write: if isCibOfficer();
+      allow write: if isDirector();
     }
   }
 }

@@ -1,32 +1,37 @@
 // context/AuthContext.tsx
 // Buró Cibernético de Investigación (CIB) - República de Panamá
-// Contexto Central de Autenticación, Roles Institucionales (RBAC) y Control de Sesión
+// Contexto Central de Autenticación Basado en Firebase Auth y RBAC Institucional
 
 'use client';
 
-import React, { createContext, useContext, useEffect, useState, useTransition } from 'react';
+import React, { createContext, useContext, useEffect, useState } from 'react';
 import { User, UserRole } from '@/types/cib';
 import { INITIAL_USERS } from '@/lib/data/initial-data';
 import { auth, db } from '@/lib/firebase/client';
 import {
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
-  signInAnonymously,
   signOut as firebaseSignOut,
   onAuthStateChanged,
   User as FirebaseUser,
 } from 'firebase/auth';
-import { doc, getDoc } from 'firebase/firestore';
+import { doc, getDoc, setDoc } from 'firebase/firestore';
+import { ENV } from '@/lib/config/environment';
+import { Permission } from '@/lib/domain/auth/permissions';
+import { canActor } from '@/lib/domain/auth/role-permissions';
+import { logger } from '@/lib/observability/logger';
 
 interface AuthContextType {
   user: User | null;
   firebaseUser: FirebaseUser | null;
   role: UserRole | null;
   loading: boolean;
+  isDemoMode: boolean;
   signIn: (email: string, pass: string) => Promise<{ success: boolean; error?: string }>;
   signInWithGoogle: () => Promise<{ success: boolean; error?: string }>;
   signOut: () => Promise<void>;
   switchQuickUser: (email: string) => Promise<void>;
+  hasPermission: (permission: Permission) => boolean;
   predefinedUsers: User[];
   isAuthorizedOfficer: boolean;
 }
@@ -36,91 +41,113 @@ const AuthContext = createContext<AuthContextType>({
   firebaseUser: null,
   role: null,
   loading: true,
+  isDemoMode: ENV.isDemo,
   signIn: async () => ({ success: false }),
   signInWithGoogle: async () => ({ success: false }),
   signOut: async () => {},
   switchQuickUser: async () => {},
+  hasPermission: () => false,
   predefinedUsers: INITIAL_USERS,
   isAuthorizedOfficer: false,
 });
 
 const COOKIE_NAME = 'cib_auth_token';
 
-function setAuthCookie(token: string) {
+function setSessionTokenCookie(token: string) {
   if (typeof document !== 'undefined') {
     document.cookie = `${COOKIE_NAME}=${encodeURIComponent(token)}; path=/; max-age=86400; SameSite=Lax`;
   }
 }
 
-function clearAuthCookie() {
+function clearSessionTokenCookie() {
   if (typeof document !== 'undefined') {
     document.cookie = `${COOKIE_NAME}=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Lax`;
   }
 }
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [user, setUser] = useState<User | null>(() => {
-    if (typeof window !== 'undefined') {
-      const savedUserRaw = localStorage.getItem('cib_active_officer');
-      if (savedUserRaw) {
-        try {
-          const parsed = JSON.parse(savedUserRaw);
-          return parsed;
-        } catch (e) {
-          console.warn('Error parsing cached officer:', e);
-        }
-      }
-      // Por defecto al Director de prueba maestro para conveniencia de evaluación
-      localStorage.setItem('cib_active_officer', JSON.stringify(INITIAL_USERS[0]));
-      return INITIAL_USERS[0];
-    }
-    return INITIAL_USERS[0];
-  });
-
+  const [user, setUser] = useState<User | null>(null);
   const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
-  const [loading, setLoading] = useState<boolean>(false);
-  const [, startTransition] = useTransition();
+  const [loading, setLoading] = useState<boolean>(true);
 
-  // Sincronizar cookie de sesión y listener de Firebase Auth
+  // Listener de Firebase Authentication
   useEffect(() => {
-    if (user) {
-      setAuthCookie(`cib-session-${user.email}`);
-    }
-
-    // Listener pasivo de Firebase Auth si está activo
     let unsubscribe = () => {};
+
     if (auth && typeof auth.onAuthStateChanged === 'function') {
       try {
         unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
           setFirebaseUser(fbUser);
-          if (fbUser?.email) {
-            // Buscar perfil institucional en Firestore o catálogo
-            const matched = INITIAL_USERS.find(
-              (u) => u.email.toLowerCase() === fbUser.email?.toLowerCase()
-            );
-            if (matched) {
-              setUser(matched);
-              localStorage.setItem('cib_active_officer', JSON.stringify(matched));
-              setAuthCookie(`cib-session-${matched.email}`);
+
+          if (fbUser) {
+            try {
+              // Obtener token JWT real para la cookie de sesión del servidor
+              const idToken = await fbUser.getIdToken();
+              setSessionTokenCookie(idToken);
+
+              // 1. Intentar cargar perfil desde Firestore
+              let profile: User | null = null;
+              if (db && typeof db.app !== 'undefined') {
+                try {
+                  const userDoc = await getDoc(doc(db, 'users', fbUser.uid));
+                  if (userDoc.exists()) {
+                    profile = userDoc.data() as User;
+                  }
+                } catch (dbErr) {
+                  logger.warn('Error al consultar perfil de usuario en Firestore', { uid: fbUser.uid }, dbErr);
+                }
+              }
+
+              // 2. Si no existe en Firestore, asociar con catálogo institucional inicial o crear perfil
+              if (!profile) {
+                const matched = INITIAL_USERS.find(
+                  (u) => u.email.toLowerCase() === fbUser.email?.toLowerCase()
+                );
+                if (matched) {
+                  profile = {
+                    ...matched,
+                    uid: fbUser.uid,
+                    lastLogin: new Date().toISOString(),
+                  };
+                  // Persistir perfil en Firestore para futuras consultas
+                  if (db && typeof db.app !== 'undefined') {
+                    try {
+                      await setDoc(doc(db, 'users', fbUser.uid), profile, { merge: true });
+                    } catch {}
+                  }
+                }
+              }
+
+              setUser(profile);
+            } catch (tokenErr) {
+              logger.error('Error al resolver token de Firebase Auth', undefined, tokenErr);
             }
+          } else {
+            // No autenticado
+            setUser(null);
+            clearSessionTokenCookie();
           }
+
           setLoading(false);
         });
-      } catch {
-        // Fallback en caso de entorno sin conexión a Firebase
+      } catch (authInitErr) {
+        logger.error('Error al inicializar listener de Firebase Auth', undefined, authInitErr);
+        setLoading(false);
       }
+    } else {
+      setLoading(false);
     }
 
     return () => unsubscribe();
-  }, [user]);
+  }, []);
 
   /**
-   * Inicio de sesión institucional con validación de dominio @cib.gob.pa
+   * Inicio de sesión institucional real vía Firebase Authentication
    */
   const signIn = async (email: string, pass: string): Promise<{ success: boolean; error?: string }> => {
     const cleanEmail = email.trim().toLowerCase();
 
-    // Regla de validación de dominio institucional
+    // Validación obligatoria de dominio institucional
     if (!cleanEmail.endsWith('@cib.gob.pa')) {
       return {
         success: false,
@@ -128,53 +155,58 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       };
     }
 
-    // 1. Intentar autenticación con Firebase Auth si es posible
+    if (!pass || pass.length < 6) {
+      return {
+        success: false,
+        error: 'CONTRASEÑA INVÁLIDA: La contraseña debe tener al menos 6 caracteres.',
+      };
+    }
+
+    // 1. Autenticación real con Firebase Authentication
     if (auth && typeof signInWithEmailAndPassword === 'function') {
       try {
         const userCred = await signInWithEmailAndPassword(auth, cleanEmail, pass);
+        const idToken = await userCred.user.getIdToken();
+        setSessionTokenCookie(idToken);
         setFirebaseUser(userCred.user);
+        return { success: true };
       } catch (firebaseErr: any) {
-        // Si el usuario no fue creado aún en Auth remoto, verificamos contra el catálogo oficial sembrado
-        console.info('[CIB-IMS] Firebase Auth no resolvió la credencial remota, verificando contra catálogo CIB:', firebaseErr?.code);
+        logger.warn('Fallo de autenticación con Firebase Auth', { email: cleanEmail, code: firebaseErr?.code });
+
+        // En modo DEMO o DEVELOPMENT: si el usuario existe en catálogo pero aún no en Firebase Auth, registrarlo
+        if (ENV.isDemo || ENV.isDevelopment) {
+          if (firebaseErr?.code === 'auth/user-not-found' || firebaseErr?.code === 'auth/invalid-credential') {
+            const catalogUser = INITIAL_USERS.find((u) => u.email.toLowerCase() === cleanEmail);
+            if (catalogUser && typeof createUserWithEmailAndPassword === 'function') {
+              try {
+                const newCred = await createUserWithEmailAndPassword(auth, cleanEmail, pass);
+                const idToken = await newCred.user.getIdToken();
+                setSessionTokenCookie(idToken);
+                setFirebaseUser(newCred.user);
+                return { success: true };
+              } catch (createErr) {
+                logger.warn('Error al auto-registrar usuario en modo desarrollo', undefined, createErr);
+              }
+            }
+          }
+        }
+
+        return {
+          success: false,
+          error:
+            firebaseErr?.code === 'auth/wrong-password' || firebaseErr?.code === 'auth/invalid-credential'
+              ? 'CONTRASEÑA INCORRECTA: Credenciales no válidas ante el servicio de autenticación.'
+              : `ERROR DE AUTENTICACIÓN: ${firebaseErr?.message || 'No fue posible validar credenciales.'}`,
+        };
       }
     }
 
-    // 2. Validación de credenciales institucionales estándar
-    const STANDARD_PASSWORD = 'clavesegura123*';
-    const foundUser = INITIAL_USERS.find((u) => u.email.toLowerCase() === cleanEmail);
-
-    if (!foundUser) {
-      return {
-        success: false,
-        error: `Agente o correo [${cleanEmail}] no registrado en el padrón de ciberseguridad nacional.`,
-      };
-    }
-
-    if (pass !== STANDARD_PASSWORD) {
-      return {
-        success: false,
-        error: 'CONTRASEÑA INVÁLIDA: Clave criptográfica o token institucional incorrecto.',
-      };
-    }
-
-    // Éxito: Establecer sesión
-    const updatedUser: User = {
-      ...foundUser,
-      lastLogin: new Date().toISOString(),
+    return {
+      success: false,
+      error: 'SERVICIO NO DISPONIBLE: El proveedor de autenticación no se encuentra inicializado.',
     };
-
-    setUser(updatedUser);
-    if (typeof window !== 'undefined') {
-      localStorage.setItem('cib_active_officer', JSON.stringify(updatedUser));
-      setAuthCookie(`cib-session-${updatedUser.email}`);
-    }
-
-    return { success: true };
   };
 
-  /**
-   * Autenticación exclusiva por correo y contraseña institucional (@cib.gob.pa)
-   */
   const signInWithGoogle = async (): Promise<{ success: boolean; error?: string }> => {
     return {
       success: false,
@@ -183,34 +215,43 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   /**
-   * Cierre de sesión forense
+   * Cierre de sesión formal
    */
   const signOut = async () => {
     if (auth && typeof firebaseSignOut === 'function') {
       try {
         await firebaseSignOut(auth);
-      } catch {}
+      } catch (err) {
+        logger.warn('Error durante cierre de sesión en Firebase Auth', undefined, err);
+      }
     }
     setUser(null);
     setFirebaseUser(null);
+    clearSessionTokenCookie();
     if (typeof window !== 'undefined') {
       localStorage.removeItem('cib_active_officer');
-      clearAuthCookie();
     }
   };
 
   /**
-   * Selector rápido para alternar entre roles durante auditorías y pruebas
+   * Selector rápido exclusivo para modo DEMO / DEVELOPMENT
+   * Prohibido estrictamente en producción institucional
    */
   const switchQuickUser = async (email: string) => {
+    if (ENV.isProduction) {
+      throw new Error('ACCESO DENEGADO: El cambio rápido de usuario está deshabilitado en entorno de PRODUCCIÓN.');
+    }
+
     const target = INITIAL_USERS.find((u) => u.email.toLowerCase() === email.toLowerCase());
     if (target) {
       setUser(target);
-      if (typeof window !== 'undefined') {
-        localStorage.setItem('cib_active_officer', JSON.stringify(target));
-        setAuthCookie(`cib-session-${target.email}`);
-      }
+      setSessionTokenCookie(`cib-demo-token-${target.email}`);
+      logger.info(`[DEMO_MODE] Sesión simulada activa para: ${target.email} (${target.role})`);
     }
+  };
+
+  const hasPermissionCheck = (permission: Permission): boolean => {
+    return canActor(user?.role, permission);
   };
 
   const isAuthorizedOfficer = Boolean(user && user.email.endsWith('@cib.gob.pa') && user.active);
@@ -222,10 +263,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         firebaseUser,
         role: user?.role || null,
         loading,
+        isDemoMode: ENV.isDemo || ENV.isDevelopment,
         signIn,
         signInWithGoogle,
         signOut,
         switchQuickUser,
+        hasPermission: hasPermissionCheck,
         predefinedUsers: INITIAL_USERS,
         isAuthorizedOfficer,
       }}

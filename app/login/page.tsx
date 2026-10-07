@@ -21,10 +21,10 @@ function LoginFormContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const redirectTarget = searchParams.get('redirect') || '/dashboard';
-  const { signIn, predefinedUsers } = useAuth();
+  const { signIn, predefinedUsers, isDemoMode } = useAuth();
 
-  const [email, setEmail] = useState('usuario1@cib.gob.pa');
-  const [password, setPassword] = useState('clavesegura123*');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -47,9 +47,9 @@ function LoginFormContent() {
     }
   };
 
-  const handleSelectPredefined = (selectedEmail: string) => {
+  const handleSelectDemoProfile = (selectedEmail: string) => {
     setEmail(selectedEmail);
-    setPassword('clavesegura123*');
+    setPassword('CibPass2026!*');
     setError(null);
   };
 
@@ -156,52 +156,40 @@ function LoginFormContent() {
           </button>
         </form>
 
-        {/* Recuadro de Credencial Maestra Solicitada */}
-        <div className="mt-6 p-4 rounded-xl bg-cyan-950/50 border border-cyan-700/50 text-xs font-mono">
-          <div className="flex items-center gap-2 text-cyan-300 font-bold mb-2">
-            <KeyRound className="w-4 h-4 text-cyan-400" />
-            <span>Credencial Maestra de Evaluación (Requerida):</span>
-          </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] text-slate-300">
-            <div className="p-2 rounded bg-black/40 border border-cyan-950">
-              <span className="text-slate-400">Email:</span>{' '}
-              <span className="text-cyan-300 font-bold">usuario1@cib.gob.pa</span>
+        {/* Perfiles de Simulación y Evaluación (Solo visible en MODO DEMO / DESARROLLO) */}
+        {isDemoMode && (
+          <div className="mt-6 border-t border-cyan-950 pt-4">
+            <div className="p-3 rounded-xl bg-amber-950/30 border border-amber-800/50 mb-3 text-[11px] font-mono text-amber-300">
+              <span className="font-bold">⚠️ ENTORNO DE SIMULACIÓN / EVALUACIÓN ACADÉMICA</span>
+              <p className="text-[10px] text-slate-300 mt-0.5">
+                Seleccione un perfil para pre-cargar credenciales de prueba del catálogo institucional.
+              </p>
             </div>
-            <div className="p-2 rounded bg-black/40 border border-cyan-950">
-              <span className="text-slate-400">Clave:</span>{' '}
-              <span className="text-emerald-300 font-bold">clavesegura123*</span>
-            </div>
-          </div>
-          <p className="text-[10px] text-slate-400 mt-2">
-            Rol: <strong className="text-cyan-300">COMISIONADO_DIRECTOR</strong> (Acceso total institucional)
-          </p>
-        </div>
 
-        {/* Selector de los 10 Usuarios Predefinidos para Validación de Roles */}
-        <div className="mt-6 border-t border-cyan-950 pt-4">
-          <div className="text-[11px] font-mono text-slate-400 font-semibold mb-2 flex items-center justify-between">
-            <span>Auto-completar Rol Institucional (10 Perfiles CIB):</span>
-            <span className="text-[10px] text-cyan-500">1-Click</span>
+            <div className="text-[11px] font-mono text-slate-400 font-semibold mb-2 flex items-center justify-between">
+              <span>Perfiles de Prueba por Rol Institucional:</span>
+              <span className="text-[10px] text-cyan-400">Autocompletar</span>
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-2 gap-1.5 max-h-44 overflow-y-auto pr-1 scrollbar-thin">
+              {predefinedUsers.map((u) => (
+                <button
+                  key={u.email}
+                  type="button"
+                  onClick={() => handleSelectDemoProfile(u.email)}
+                  className={`p-2 rounded-lg text-left text-[10px] font-mono border transition-all cursor-pointer ${
+                    email === u.email
+                      ? 'bg-cyan-950 border-cyan-500 text-cyan-200'
+                      : 'bg-black/30 border-slate-800 text-slate-400 hover:border-cyan-800 hover:text-slate-200'
+                  }`}
+                >
+                  <div className="font-bold truncate text-slate-200">{u.displayName.split(' ')[0]} {u.displayName.split(' ')[1]}</div>
+                  <div className="text-[9px] text-cyan-400 truncate">{u.role}</div>
+                  <div className="text-[9px] text-slate-500 truncate">{u.email}</div>
+                </button>
+              ))}
+            </div>
           </div>
-          <div className="grid grid-cols-2 sm:grid-cols-2 gap-1.5 max-h-44 overflow-y-auto pr-1 scrollbar-thin">
-            {predefinedUsers.map((u) => (
-              <button
-                key={u.email}
-                type="button"
-                onClick={() => handleSelectPredefined(u.email)}
-                className={`p-2 rounded-lg text-left text-[10px] font-mono border transition-all cursor-pointer ${
-                  email === u.email
-                    ? 'bg-cyan-950 border-cyan-500 text-cyan-200'
-                    : 'bg-black/30 border-slate-800 text-slate-400 hover:border-cyan-800 hover:text-slate-200'
-                }`}
-              >
-                <div className="font-bold truncate text-slate-200">{u.displayName.split(' ')[0]} {u.displayName.split(' ')[1]}</div>
-                <div className="text-[9px] text-cyan-400 truncate">{u.role}</div>
-                <div className="text-[9px] text-slate-500 truncate">{u.email}</div>
-              </button>
-            ))}
-          </div>
-        </div>
+        )}
       </div>
     </div>
   );
